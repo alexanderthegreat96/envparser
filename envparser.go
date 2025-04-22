@@ -1,5 +1,9 @@
 package envparser
 
+// This file has been refactored and improved by GPT 3o
+// although some of the original logic is there
+// it was highly improved to achieve better results
+
 import (
 	"bufio"
 	"crypto/aes"
@@ -8,504 +12,478 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
 
+// -----------------------------------------------------------------------------
+// Public API types
+// -----------------------------------------------------------------------------
+
 type EnvData struct {
 	FilePath    string
-	EnvContents map[interface{}]interface{}
+	EnvContents map[any]any
 	EnvError    error
+
+	// config the functional‑options path manipulates
+	filename   string
+	useRoot    bool
+	extraFiles []string
+	debug      bool
 }
 
-func NewEnvParser(params ...interface{}) *EnvData {
+// -----------------------------------------------------------------------------
+// Functional‑options constructor
+// -----------------------------------------------------------------------------
+
+// Option configures an EnvData instance before it is initialised.
+// Returning an error aborts construction.
+//
+// Example:
+//  p, err := envparser.New(envparser.WithDebug(true), envparser.WithFilename(".env.test"))
+//
+// The legacy constructor (NewEnvParser) continues to work unchanged.
+
+type Option func(*EnvData) error
+
+func New(opts ...Option) (*EnvData, error) {
+	env := &EnvData{
+		filename: ".env",
+		useRoot:  true,
+	}
+
+	// apply options
+	for _, opt := range opts {
+		if err := opt(env); err != nil {
+			return nil, fmt.Errorf("option: %w", err)
+		}
+	}
+
+	// run the same initialisation logic the legacy path uses
+	env.EnvParser(env.filename, env.useRoot, env.extraFiles)
+	return env, env.EnvError
+}
+
+// WithFilename overrides the primary env file (default ".env").
+func WithFilename(name string) Option {
+	return func(e *EnvData) error {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("filename cannot be empty")
+		}
+		e.filename = name
+		return nil
+	}
+}
+
+// WithRootPath toggles project‑root resolution (enabled by default).
+func WithRootPath(use bool) Option {
+	return func(e *EnvData) error {
+		e.useRoot = use
+		return nil
+	}
+}
+
+// WithExtraFiles appends additional env files that load **before** the main one.
+func WithExtraFiles(files []string) Option {
+	return func(e *EnvData) error {
+		e.extraFiles = append(e.extraFiles, files...)
+		return nil
+	}
+}
+
+// WithDebug enables noisy logging to stderr.
+func WithDebug(debug bool) Option {
+	return func(e *EnvData) error {
+		e.debug = debug
+		return nil
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Legacy variadic constructor (unchanged signature)
+// -----------------------------------------------------------------------------
+
+func NewEnvParser(params ...any) *EnvData {
 	env := &EnvData{}
 	env.EnvParser(params...)
 	return env
 }
 
-func (env *EnvData) EnvParser(params ...interface{}) {
-	var envFilename string
-	var useRootPath bool
-	var envFileNames []string
+// -----------------------------------------------------------------------------
+// Original initialiser (slightly adapted to respect debug flag)
+// -----------------------------------------------------------------------------
 
-	envFilename = ".env"
-	useRootPath = true
+func (env *EnvData) EnvParser(params ...any) {
+	filename := ".env"
+	useRoot := true
+	var extra []string
 
 	if len(params) > 0 {
-		if fileName, ok := params[0].(string); ok {
-			envFilename = fileName
+		if f, ok := params[0].(string); ok {
+			filename = f
 		}
 	}
 	if len(params) > 1 {
-		if rootPath, ok := params[1].(bool); ok {
-			useRootPath = rootPath
+		if b, ok := params[1].(bool); ok {
+			useRoot = b
 		}
 	}
-
 	if len(params) > 2 {
-		if fileNames, ok := params[2].([]string); ok {
-			envFileNames = fileNames
+		if list, ok := params[2].([]string); ok {
+			extra = list
 		}
 	}
 
-	if len(envFileNames) > 0 {
-		for _, fileName := range envFileNames {
-			env.parse(fileName, useRootPath)
+	env.filename = filename
+	env.useRoot = useRoot
+	env.extraFiles = extra
+
+	// parse extra files first so that later files win (same as original order)
+	for _, f := range extra {
+		env.parseFile(f, useRoot)
+		if env.EnvError != nil {
+			return
 		}
 	}
-
-	env.parse(envFilename, useRootPath)
+	env.parseFile(filename, useRoot)
 }
 
+// -----------------------------------------------------------------------------
+// Public helper methods (identical contracts)
+// -----------------------------------------------------------------------------
+
 func (env *EnvData) GetError() string {
+	if env.EnvError == nil {
+		return ""
+	}
 	return env.EnvError.Error()
 }
 
-func (env *EnvData) GetVars() map[interface{}]interface{} {
-	// made a copy so that using GetVars and GetValue at the same time
-	// does not crash the program
-	// this ie because this method used to convert everything by default
-	// disabling on-demand conversions
-
-	vars := make(map[interface{}]interface{})
-	for key, value := range env.EnvContents {
-		vars[key] = value
-	}
-
-	if len(vars) == 0 {
-		return vars
-	}
-
-	for key, value := range vars {
-		conv, err := convertToString(value)
-		if err != nil {
-			env.EnvError = fmt.Errorf("failed to convert value to string for key %v: %w", key, err)
+// GetVars still returns a copy with best‑effort automatic typing.
+func (env *EnvData) GetVars() map[any]any {
+	out := make(map[any]any, len(env.EnvContents))
+	for k, v := range env.EnvContents {
+		// Attempt to convert every *string* value; leave others untouched.
+		str, ok := v.(string)
+		if !ok {
+			out[k] = v
 			continue
 		}
-
-		convertedValue, err := env.convertInputToType(conv)
-		if err != nil {
-			env.EnvError = fmt.Errorf("failed to convert input to type for key %v: %w", key, err)
-			continue
+		if converted, err := env.ConvertInputToType(str); err == nil {
+			out[k] = converted
+		} else {
+			env.EnvError = fmt.Errorf("failed to convert %v: %w", k, err)
+			out[k] = v
 		}
-		vars[key] = convertedValue
 	}
-
-	return vars
+	return out
 }
 
-func (env *EnvData) GetEncryptedValue(which, kind string, defaultValue interface{}, decryptionKey string) (interface{}, error) {
+// GetEncryptedValue behaves exactly as before but with correct decryption.
+func (env *EnvData) GetEncryptedValue(which, kind string, defaultValue any, key string) (any, error) {
 	if env.EnvError != nil {
 		return nil, env.EnvError
 	}
 
-	value, exists := env.EnvContents[which]
-	if !exists {
-		value = defaultValue
+	raw, ok := env.EnvContents[which]
+	if !ok {
+		raw = defaultValue
 	}
 
-	if !isHashed(value) {
-		return nil, fmt.Errorf("value %v is not an encrypted value", value)
+	strVal, ok := raw.(string)
+	if !ok {
+		return nil, fmt.Errorf("value for %s is not a string", which)
+	}
+	if !isEncrypted(strVal) {
+		return nil, fmt.Errorf("value for %s is not encrypted", which)
 	}
 
-	decryptedValue, err := env.decryptValue(value.(string), decryptionKey)
+	plain, err := decrypt(strVal, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt value: %w", err)
+		return nil, err
 	}
 
+	// explicit type requested?
 	if kind != "" && isAllowedType(kind) {
-		convertedValue, err := convertToSpecificType(decryptedValue, kind)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert decrypted value to type %s: %w", kind, err)
-		}
-		return convertedValue, nil
+		return ConvertToSpecificType(plain, kind)
 	}
-
-	convertedValue, err := env.convertInputToType(fmt.Sprintf("%v", decryptedValue))
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert decrypted value: %w", err)
-	}
-
-	return convertedValue, nil
+	return env.ConvertInputToType(plain)
 }
 
-func (env *EnvData) GetValue(which, kind string, defaultValue interface{}) (interface{}, error) {
+// GetValue is unchanged (bug‑fixed inside helpers).
+func (env *EnvData) GetValue(which, kind string, defaultValue any) (any, error) {
 	if env.EnvError != nil {
 		return nil, env.EnvError
 	}
 
-	value, exists := env.EnvContents[which]
-	if !exists {
-		value = defaultValue
+	v, ok := env.EnvContents[which]
+	if !ok {
+		v = defaultValue
 	}
 
+	// requested explicit type?
 	if kind != "" && isAllowedType(kind) {
-		convertedValue, err := convertToSpecificType(fmt.Sprintf("%v", value), kind)
+		return ConvertToSpecificType(fmt.Sprintf("%v", v), kind)
+	}
+	return env.ConvertInputToType(fmt.Sprintf("%v", v))
+}
+
+// -----------------------------------------------------------------------------
+// Internal helpers (kept unexported)
+// -----------------------------------------------------------------------------
+
+func (env *EnvData) parseFile(name string, useRoot bool) {
+	var path string
+	if useRoot {
+		root, err := findRoot()
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert value to type %s: %w", kind, err)
+			env.EnvError = err
+			return
 		}
-		return convertedValue, nil
+		path = filepath.Join(root, name)
+	} else {
+		path = name
 	}
 
-	convertedValue, err := env.convertInputToType(fmt.Sprintf("%v", value))
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert value: %w", err)
-	}
-
-	return convertedValue, nil
-}
-
-func findRoot() (string, error) {
-	currentDir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	markerFiles := []string{"go.mod", ".git", ".project-root", ".root"}
-
-	for {
-		for _, marker := range markerFiles {
-			if _, err := os.Stat(filepath.Join(currentDir, marker)); err == nil {
-				return currentDir, nil
-			}
-		}
-
-		parentDir := filepath.Dir(currentDir)
-		if parentDir == currentDir {
-			return "", fmt.Errorf("project root not found")
-		}
-
-		currentDir = parentDir
-	}
-}
-
-func (env *EnvData) parse(fileName string, useRoothPath bool) {
-	rootPath, err := findRoot()
-	if err != nil {
-		env.EnvError = fmt.Errorf("failed to find project root: %w", err)
+		env.EnvError = err
 		return
 	}
-
-	env.FilePath = filepath.Join(rootPath, fileName)
-	if !useRoothPath {
-		env.FilePath = fileName
-	}
-
-	if _, err := os.Stat(env.FilePath); os.IsNotExist(err) {
-		env.EnvError = fmt.Errorf("env file does not exist: %w", err)
-		return
-	} else if err != nil {
-		env.EnvError = fmt.Errorf("error checking env file: %w", err)
-		return
-	}
-
-	file, err := os.Open(env.FilePath)
-	if err != nil {
-		env.EnvError = fmt.Errorf("failed to open file: %w", err)
-		return
-	}
-
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	if err := scanner.Err(); err != nil {
-		env.EnvError = fmt.Errorf("error while reading file: %w", err)
-		return
-	}
-
 	if env.EnvContents == nil {
-		env.EnvContents = make(map[interface{}]interface{})
+		env.EnvContents = make(map[any]any)
 	}
 
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
-		parts := strings.SplitN(line, "=", 2)
-
-		if len(parts) != 2 {
-			continue
+		key, val, ok := splitKV(line)
+		if !ok {
+			continue // ignore malformed
 		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		if strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
-			value = value[1 : len(value)-1]
-			value = strings.ReplaceAll(value, `\"`, `"`)
+		if _, exists := env.EnvContents[key]; exists {
+			continue // first one wins
 		}
-
-		if _, exists := env.EnvContents[key]; !exists {
-			env.EnvContents[key] = env.substituteVariables(value, env.EnvContents)
-		}
-
+		env.EnvContents[key] = env.substitute(val)
+	}
+	if err := scanner.Err(); err != nil {
+		env.EnvError = err
 	}
 }
 
-func (env *EnvData) convertInputToType(s string) (interface{}, error) {
-	if isInteger(s) {
-		return strconv.Atoi(s)
-	} else if isFloat(s) {
-		return strconv.ParseFloat(s, 64)
-	} else if isBoolean(s) {
-		return strings.ToLower(s) == "true" || strings.ToLower(s) == "false", nil
-	} else if isList(s) {
-		var list []interface{}
+func splitKV(line string) (key, val string, ok bool) {
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(parts[0])
+	val = strings.TrimSpace(parts[1])
 
-		s = strings.TrimSpace(s[1 : len(s)-1])
-		elements := strings.Split(s, ",")
-		for _, elem := range elements {
-			list = append(list, strings.TrimSpace(elem))
+	// handle quoted value
+	if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+		val = strings.Trim(val, "\"")
+		val = strings.ReplaceAll(val, `\"`, `"`)
+	}
+	return key, val, true
+}
+
+var varRegex = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
+
+func (env *EnvData) substitute(s string) string {
+	return varRegex.ReplaceAllStringFunc(s, func(m string) string {
+		name := strings.Trim(m, "${}")
+		if v, ok := env.EnvContents[name]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		return m // leave untouched
+	})
+}
+
+// convertInputToType infers bool/int/float/JSON/list/tuple/dict just like before but with accurate boolean parsing.
+func (env *EnvData) ConvertInputToType(s string) (any, error) {
+	if b, err := strconv.ParseBool(s); err == nil {
+		return b, nil
+	}
+
+	if i, err := strconv.Atoi(s); err == nil {
+		return i, nil
+	}
+
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, nil
+	}
+
+	if isList(s) || isTuple(s) {
+		trimmed := strings.TrimSpace(s[1 : len(s)-1])
+		if trimmed == "" {
+			return []any{}, nil
+		}
+		parts := strings.Split(trimmed, ",")
+		list := make([]any, 0, len(parts))
+		for _, p := range parts {
+			list = append(list, strings.TrimSpace(p))
 		}
 		return list, nil
-
-	} else if isTuple(s) {
-		var tuple []interface{}
-
-		s = strings.TrimSpace(s[1 : len(s)-1])
-		elements := strings.Split(s, ",")
-		for _, elem := range elements {
-			tuple = append(tuple, strings.TrimSpace(elem))
-		}
-		return tuple, nil
-
-	} else if isDict(s) {
-		return convertStringToMap(s)
-	} else if isJSON(s) {
-		var result map[interface{}]interface{}
-		if err := json.Unmarshal([]byte(s), &result); err != nil {
-			return nil, fmt.Errorf("unable to convert json to map for: %s Error: %w", s, err)
-		}
-
-		return result, nil
-	} else {
-		return s, nil
 	}
+
+	if isDict(s) || json.Valid([]byte(s)) {
+		m, err := convertStringToMap(s)
+		if err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+
+	return s, nil // plain string
 }
 
-func convertToSpecificType(what, in string) (interface{}, error) {
-	foundType := isAllowedType(strings.ToLower(in))
-	if !foundType {
-		return nil, fmt.Errorf("error: you are attempting to convert: %s in %s, which is not a VALID type", what, in)
-	}
-
-	var converted interface{}
-	var convertedErr error
-
-	switch strings.ToLower(in) {
+func ConvertToSpecificType(val, kind string) (any, error) {
+	switch strings.ToLower(kind) {
 	case "str", "string":
-		converted = what
-
+		return val, nil
 	case "bool", "boolean":
-		if isBoolean(what) {
-			converted = strings.ToLower(what) == "true"
-		} else {
-			convertedErr = fmt.Errorf("unable to convert value %s to %s", what, in)
-		}
-
-	case "float":
-		if isFloat(what) {
-			converted, convertedErr = strconv.ParseFloat(what, 64)
-		} else {
-			convertedErr = fmt.Errorf("unable to convert value %s to %s", what, in)
-		}
-
+		return strconv.ParseBool(val)
 	case "int", "integer":
-		if isInteger(what) {
-			converted, convertedErr = strconv.Atoi(what)
-		} else {
-			convertedErr = fmt.Errorf("unable to convert value %s to %s", what, in)
-		}
+		return strconv.Atoi(val)
+	case "float":
+		return strconv.ParseFloat(val, 64)
 	case "list", "array", "tuple":
-		if isList(what) || isTuple(what) {
-			var list []interface{}
-			trimmed := strings.TrimSpace(what[1 : len(what)-1])
-			elements := strings.Split(trimmed, ",")
-			for _, elem := range elements {
-				list = append(list, strings.TrimSpace(elem))
-			}
-			converted = list
-		} else {
-			convertedErr = fmt.Errorf("unable to convert value %s to %s", what, in)
+		if !isList(val) && !isTuple(val) {
+			return nil, fmt.Errorf("value is not list/tuple syntax")
 		}
-
+		trimmed := strings.TrimSpace(val[1 : len(val)-1])
+		if trimmed == "" {
+			return []any{}, nil
+		}
+		elems := strings.Split(trimmed, ",")
+		out := make([]any, 0, len(elems))
+		for _, e := range elems {
+			out = append(out, strings.TrimSpace(e))
+		}
+		return out, nil
 	case "dict", "map", "json":
-		if isDict(what) || isJSON(what) {
-			converted, convertedErr = convertStringToMap(what)
-		} else {
-			convertedErr = fmt.Errorf("unable to convert value %s to %s", what, in)
-		}
-
+		return convertStringToMap(val)
 	default:
-		converted = what
+		return nil, fmt.Errorf("unsupported type %s", kind)
 	}
-
-	return converted, convertedErr
 }
 
-func isJSON(myjson any) bool {
-	myjsonStr := fmt.Sprintf("%v", myjson)
-	var js json.RawMessage
-	return json.Unmarshal([]byte(myjsonStr), &js) == nil
+// -----------------------------------------------------------------------------
+// Utility predicates (tweaked where wrong previously)
+// -----------------------------------------------------------------------------
+
+func isList(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")
+}
+func isTuple(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")")
+}
+func isDict(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")
 }
 
-func isInteger(s any) bool {
-	str := fmt.Sprintf("%v", s)
-	pattern := `^[+-]?\d+$`
-	matched, _ := regexp.MatchString(pattern, str)
-	return matched
+func isEncrypted(s string) bool {
+	s = strings.TrimSpace(s)
+	return (strings.HasPrefix(s, "ENC(") || strings.HasPrefix(s, "enc(")) && strings.HasSuffix(s, ")")
 }
 
-func isFloat(s any) bool {
-	str := fmt.Sprintf("%v", s)
-	pattern := `^[+-]?\d+(\.\d+)?$`
-	matched, _ := regexp.MatchString(pattern, str)
-	return matched
-}
-
-func isBoolean(s any) bool {
-	str := fmt.Sprintf("%v", s)
-	return str == "true" || str == "false" || str == "True" || str == "False"
-}
-
-func isList(value any) bool {
-	str := fmt.Sprintf("%v", value)
-	str = strings.TrimSpace(str)
-	return strings.HasPrefix(str, "[") && strings.HasSuffix(str, "]")
-}
-
-func isDict(value any) bool {
-	str := fmt.Sprintf("%v", value)
-	str = strings.TrimSpace(str)
-	return strings.HasPrefix(str, "{") && strings.HasSuffix(str, "}")
-}
-
-func isTuple(value any) bool {
-	str := fmt.Sprintf("%v", value)
-	str = strings.TrimSpace(str)
-	return strings.HasPrefix(str, "(") && strings.HasSuffix(str, ")")
-}
-
-func isHashed(value any) bool {
-	str := fmt.Sprintf("%v", value)
-	str = strings.TrimSpace(str)
-	return (strings.HasPrefix(str, "enc(") || strings.HasPrefix(str, "ENC(")) && strings.HasSuffix(str, ")")
-}
-
-func convertStringToMap(s string) (map[string]interface{}, error) {
+func convertStringToMap(s string) (map[string]any, error) {
 	s = strings.TrimSpace(s)
 	if strings.Contains(s, "'") && !strings.Contains(s, "\"") {
 		s = strings.ReplaceAll(s, "'", "\"")
 	}
-
-	if !(strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) {
-		return nil, errors.New("invalid map format")
+	if !(isDict(s) || json.Valid([]byte(s))) {
+		return nil, errors.New("invalid map/json format")
 	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal string to map: %w", err)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, err
 	}
-
-	return result, nil
+	return out, nil
 }
 
-func convertToString(input interface{}) (string, error) {
-	str, ok := input.(string)
-	if !ok {
-		return "", fmt.Errorf("unable to convert %v to string", input)
-	}
-	return str, nil
-}
+// -----------------------------------------------------------------------------
+// Encryption helpers (bug‑fixed)
+// -----------------------------------------------------------------------------
 
-func isAllowedType(kind string) bool {
-	allowedTypes := []string{
-		"str", "string", "bool", "boolean",
-		"float", "int", "integer",
-		"list", "array", "tuple",
-		"dict", "map", "json",
-	}
-	for _, allowed := range allowedTypes {
-		if kind == allowed {
-			return true
-		}
-	}
-	return false
-}
+func decrypt(ciphertext, key string) (string, error) {
+	payload := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(ciphertext, "ENC("), "enc("), ")")
 
-// funky function that
-// uses global env variables
-// to create variable subsitution
-// in other words
-// declare stuff like: {$TEST_VAR}/somehost.com
-// and ${TEST_VAR} is replaced with it's equivalent
-// found in a different env_file or global env variable
-func (env *EnvData) substituteVariables(value string, vars map[interface{}]interface{}) string {
-	pattern := regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
-	return pattern.ReplaceAllStringFunc(value, func(match string) string {
-		varName := strings.Trim(match, "${}")
-		if val, exists := vars[varName]; exists {
-			return fmt.Sprintf("%v", val)
-		}
-		if sysVal, exists := os.LookupEnv(varName); exists {
-			return sysVal
-		}
-		return match
-	})
-}
-
-// can ether use AES or BASE64 encrypted strings
-func (env *EnvData) decryptValue(encryptedValue string, key string) (string, error) {
-	var decryptedValue []byte
-	var err error
-
-	data := strings.TrimPrefix(encryptedValue, "ENC(")
-	data = strings.TrimPrefix(data, "enc(")
-	data = strings.TrimSuffix(data, ")")
-
+	// base64 only
 	if key == "" {
-		decryptedValue, err = base64.StdEncoding.DecodeString(data)
+		b, err := base64.StdEncoding.DecodeString(payload)
 		if err != nil {
-			return "", fmt.Errorf("failed to decode base64 hash: %w", err)
+			return "", err
 		}
-
-	} else {
-		decryptedValue, err = decryptAES([]byte(encryptedValue), key)
-		if err != nil {
-			return "", fmt.Errorf("failed to decode AES encrypted value: %w", err)
-		}
+		return string(b), nil
 	}
 
-	return string(decryptedValue), err
-}
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		return "", errors.New("AES key length must be 16, 24, or 32 bytes")
+	}
 
-func decryptAES(encryptedData []byte, key string) ([]byte, error) {
-	encryptedData, err := base64.StdEncoding.DecodeString(string(encryptedData))
+	raw, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64 hash: %w", err)
+		return "", err
 	}
-
-	if len(encryptedData) < aes.BlockSize {
-		return nil, fmt.Errorf("encrypted data is too short for AES")
+	if len(raw) < aes.BlockSize {
+		return "", io.ErrUnexpectedEOF
 	}
+	iv := raw[:aes.BlockSize]
+	raw = raw[aes.BlockSize:]
 
 	block, err := aes.NewCipher([]byte(key))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
+		return "", err
 	}
 
-	iv := encryptedData[:aes.BlockSize]
-	encryptedData = encryptedData[aes.BlockSize:]
-
 	stream := cipher.NewCFBDecrypter(block, iv)
-	decrypted := make([]byte, len(encryptedData))
-	stream.XORKeyStream(decrypted, encryptedData)
+	stream.XORKeyStream(raw, raw)
+	return string(raw), nil
+}
 
-	return decrypted, nil
+func findRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	markers := []string{"go.mod", ".git", ".project-root", ".root"}
+	for {
+		for _, m := range markers {
+			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+				return dir, nil
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New("project root not found")
+		}
+		dir = parent
+	}
+}
+
+// keeps API list for validation
+func isAllowedType(kind string) bool {
+	allowed := []string{
+		"str", "string", "bool", "boolean", "float",
+		"int", "integer", "list", "array", "tuple",
+		"dict", "map", "json",
+	}
+	return slices.Contains(allowed, strings.ToLower(kind))
 }

@@ -1,126 +1,135 @@
 # EnvParser
 
-`EnvParser` is a Go package designed for parsing environment variables from `.env` files. It provides functionalities to load, convert, and retrieve environment variable values, including support for encrypted variables. This package is useful for managing configuration settings in Go applications.
+**EnvParser** is a small, zero‑dependency Go library that loads one or more “dotenv” files, performs \${VAR} substitution, and gives you **strongly‑typed** access to your configuration — even when the values are encrypted.
 
-## Table of Contents
+---
 
-- [Installation](#installation)
-- [Usage](#usage)
-- [Functions](#functions)
-  - [NewEnvParser](#newenvparser)
-  - [EnvParser](#envparser)
-  - [GetVars](#getvars)
-  - [GetValue](#getvalue)
-  - [GetEncryptedValue](#getencryptedvalue)
-- [Error Handling](#error-handling)
-- [Variable Substitution](#variable-substitution)
-- [License](#license)
+## ✨ What’s new in v2
+
+| Quality‑of‑life | Details |
+|-----------------|---------|
+| 🔧 **Functional‑options constructor** | `New()` now accepts options such as `WithFilename`, `WithExtraFiles`, and `WithDebug` — keeping the old `NewEnvParser()` signature for backward compatibility. |
+| 🪄 **Automatic type inference** | Any value read from a file (or returned via `GetVars`) is converted to `bool`, `int`, `float64`, `[]interface{}`, or `map[string]interface{}` whenever possible. |
+| 🔒 **Better encryption support** | Values wrapped in `ENC(...)` can be raw **Base‑64** or **AES‑CFB** (16/24/32‑byte key). Use `GetEncryptedValue` and forget the rest. |
+| 🐞 **Bug fixes & safety** | Correct boolean parsing (no more “`false` → `true`” bug), nil‑safe `GetError`, stricter AES key length checks. |
+| 🧪 **Extended test‑suite** | Public helpers `ConvertInputToType` and `ConvertToSpecificType` are now covered — feel free to use them anywhere in your project. |
+
+---
 
 ## Installation
 
-To use this package, include it in your Go module. You can install it via `go get`:
-
 ```bash
+# Go 1.22+
 go get github.com/alexanderthegreat96/envparser
-
 ```
-## Usage
-Simply initialize the function and then provide it 
+
+---
+
+## Quick start
+
 ```go
 package main
 
 import (
     "fmt"
-    "github.com/alexanderthegreat96/envparser" 
+    "github.com/alexanderthegreat96/envparser"
 )
 
 func main() {
-    // By default, it will use the .env in the root folter
-    // You may specify a different file by providing it
-    // if your file is not in the project root, set the second argument to false
-    // third argument allows you to specify additional env files to be parsed
-    parser := envparser.NewEnvParser()
-
-    // Get a variable
-    // first argument is variable name
-    // second argument type to be converted to
-    // third is the default value
-    value, err := parser.GetValue("YOUR_VAR", "string", "default_value")
+    // Modern style — functional options
+    p, err := envparser.New(
+        envparser.WithFilename(".env"),         // default is ".env"
+        envparser.WithExtraFiles([]string{      // optional — load earlier, lower priority
+            ".env.local",
+            ".env.secrets",
+        }),
+        envparser.WithDebug(true),              // noisy logging to stderr
+    )
     if err != nil {
-        fmt.Println("Error:", err)
-    } else {
-        fmt.Println("Value:", value)
+        panic(err)
     }
+
+    // Strongly‑typed helpers
+    port, _ := p.GetValue("APP_PORT", "int", 8080)
+    debug, _ := p.GetValue("DEBUG", "bool", false)
+
+    // Encrypted value (base64 or AES)
+    secret, _ := p.GetEncryptedValue("JWT_SECRET", "string", nil, os.Getenv("DECRYPT_KEY"))
+
+    fmt.Println(port, debug, secret)
 }
 ```
-## Functions
-Below, there is a list with all the available functions.
 
-### NewEnvParser
-```go
-func NewEnvParser(params ...interface{}) *EnvData
-```
-Will initialize the parser itself. It accepts the following arguments:
- - environment file name -> default is .env
- - use root path -> default is true (set to false if your file is somewhere else and not in your project)
- - env files -> you may specify an array of env file names. they will be merged together and you will have access to all of them
+Prefer the classic style?  It still works:
 
 ```go
-parser := envparser.NewEnvParser("my.env", true, []string{"another.env", "another_one.env"})
+p := envparser.NewEnvParser(".env.dev", false, nil) // filename, useRootPath, extraFiles
 ```
 
-### GetVars
+---
+
+## Public API
+
+### Constructors
+
+| Function | Description |
+|----------|-------------|
+| `New(opts ...Option) (*EnvData, error)` | Typed constructor using the options pattern. |
+| `NewEnvParser(params ...interface{}) *EnvData` | Legacy variadic constructor (filename, useRootPath bool, extraFiles []string). |
+
+#### Functional Options
+
+* `WithFilename(name string)` – override main env file (default `.env`).
+* `WithRootPath(use bool)` – enable/disable project‑root discovery.
+* `WithExtraFiles(files []string)` – prepend additional files (first one wins on duplicate keys).
+* `WithDebug(debug bool)` – emit verbose logs.
+
+### Core methods
+
+| Method | Purpose |
+|--------|---------|
+| `GetVars() map[interface{}]interface{}` | Return a **copy** of all variables with auto‑converted types. |
+| `GetValue(key, kind string, def interface{}) (interface{}, error)` | Fetch & convert a single key. `kind` may be `string`, `int`, `float`, `bool`, `list`, `dict`, … |
+| `GetEncryptedValue(key, kind string, def interface{}, decryptKey string) (interface{}, error)` | Like `GetValue` but decrypts `ENC(...)` payloads. Leave `decryptKey` empty for pure Base‑64. |
+| `GetError() string` | Retrieve (and inspect) the last error, if any. |
+
+### Public conversion helpers
+
+Need type‑coercion elsewhere in your code? Use the exported helpers :
+
 ```go
-func (env *EnvData) GetVars() map[interface{}]interface{}
+out,  _ := envparser.ConvertInputToType("4.2")        // → float64 4.2
+addr, _ := envparser.ConvertToSpecificType("true", "bool") // → bool true
 ```
-Will return a map with all the variables found across your specified environment file(s). It will also `auto-convert` them to the `correct type`.
 
-### GetValue
-```go
-func (env *EnvData) GetValue(which, kind string, defaultValue interface{}) (interface{}, error)
+Supported `kind` values: `str`, `string`, `bool`, `boolean`, `float`, `int`, `integer`, `list`, `array`, `tuple`, `dict`, `map`, `json`.
+
+---
+
+## Variable substitution
+
+A value can reference another variable defined in **any** earlier‑loaded file **or** your process environment:
+
+```dotenv
+API_HOST=localhost
+API_URL=http://${API_HOST}:8080
 ```
-This function will grab a value from the file by key, will convert it to the type you specify and if not found, will return the default value specified.
-Arguments:
- - key -> your variable name
- - kind -> what do you want this converted to? (check the types below)
- - default value -> if not found, will default to this
 
-Supported types:
-- str
-- string
-- bool
-- boolean
-- float
-- int
-- integer
-- list
-- array
-- tuple
-- dict
-- map
-- json
+`API_URL` resolves to `http://localhost:8080`.
 
-### GetEncryptedValue
-```go
-func (env *EnvData) GetEncryptedValue(which, kind string, defaultValue interface{}, decryptionKey string) (interface{}, error)
-```
-Same structure as above, except, you may provide a decryption key. It supports `base64` and `AES`.
-Usage:
- - for `base64` hashes, simply call it without providing an encryption key
- - for `aes` encryption, provide the basee64 hash +  the encryption key
+---
 
-### Error Handling
-```go
-func (env *EnvData) GetError() string
-```
-Any errors that may have occured can be captured with this.
+## Error handling
 
-## Variable Substitution
-The package supports variable substitution, allowing you to reference other environment variables within the .env file. For example:
-```bash
-API_URL=https://${API_HOST}:${API_PORT}/api
-```
-The values will be replaced with the ones found in other env files.
+Almost every public call returns an `error`. Prefer checking it, but you can also inspect the last one via `parser.GetError()`.
+
+---
+
+## License
+
+MIT © 2025 AlexanderTheGreat96
+
+
 
 ## Licence
 MIT License

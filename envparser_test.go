@@ -2,114 +2,191 @@ package envparser
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
-func TestNewEnvParser(t *testing.T) {
+// -----------------------------------------------------------------------------
+// Constructors
+// -----------------------------------------------------------------------------
+
+func TestLegacyConstructorInitialisesMap(t *testing.T) {
 	env := NewEnvParser()
 	if env.EnvContents == nil {
-		t.Error("Expected EnvContents to be initialized")
+		t.Error("expected EnvContents to be initialised")
 	}
 }
 
-func TestEnvParser_ValidFile(t *testing.T) {
+func TestFunctionalOptionsConstructor(t *testing.T) {
+	env, err := New(
+		WithFilename(".env"), // file may not exist, we only test construction
+		WithRootPath(false),
+		WithDebug(true),
+	)
+	if err != nil && !os.IsNotExist(err) { // ignore ENOENT edge case
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env.EnvContents == nil {
+		t.Error("expected EnvContents to be initialised")
+	}
+	if !env.debug {
+		t.Error("expected debug flag to be true")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// File parsing
+// -----------------------------------------------------------------------------
+
+func TestParseValidFile(t *testing.T) {
 	testFile := ".env.test"
-	err := os.WriteFile(testFile, []byte("TEST_VAR=value\nANOTHER_VAR=another_value"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+	content := "TEST_VAR=value\nANOTHER_VAR=another_value"
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("cannot create test file: %v", err)
 	}
-	defer os.Remove(testFile)
+	t.Cleanup(func() { os.Remove(testFile) })
 
-	env := NewEnvParser(testFile)
-	env.EnvParser(testFile)
-
+	env := NewEnvParser(testFile, false) // useRootPath=false so cwd is used
 	if env.EnvError != nil {
-		t.Errorf("Expected no error but got: %v", env.EnvError)
+		t.Fatalf("unexpected error: %v", env.EnvError)
 	}
-
-	if env.EnvContents["TEST_VAR"] != "value" {
-		t.Errorf("Expected TEST_VAR to be 'value', got: %v", env.EnvContents["TEST_VAR"])
+	if got := env.EnvContents["TEST_VAR"]; got != "value" {
+		t.Errorf("TEST_VAR: want value, got %v", got)
 	}
 }
 
-func TestEnvParser_NonExistentFile(t *testing.T) {
-	env := NewEnvParser("non_existent.env")
-	env.EnvParser()
-
+func TestNonExistentFile(t *testing.T) {
+	env := NewEnvParser("non_existent.env", false)
 	if env.EnvError == nil {
-		t.Error("Expected an error for non-existent file but got none")
+		t.Error("expected error for missing file")
 	}
 }
 
-func TestGetValue_ExistingVariable(t *testing.T) {
+// -----------------------------------------------------------------------------
+// GetValue helpers
+// -----------------------------------------------------------------------------
+
+func TestGetValueExisting(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{
-		"EXISTING_VAR": "some_value",
-	}
+	env.EnvContents = map[interface{}]interface{}{"EXISTING_VAR": "some_value"}
 
-	value, err := env.GetValue("EXISTING_VAR", "", nil)
+	v, err := env.GetValue("EXISTING_VAR", "", nil)
 	if err != nil {
-		t.Errorf("Expected no error but got: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if value != "some_value" {
-		t.Errorf("Expected 'some_value', got: %v", value)
+	if v != "some_value" {
+		t.Errorf("want some_value, got %v", v)
 	}
 }
 
-func TestGetValue_NonExistingVariable(t *testing.T) {
+func TestGetValueDefault(t *testing.T) {
 	env := NewEnvParser()
 	env.EnvContents = map[interface{}]interface{}{}
 
-	value, err := env.GetValue("NON_EXISTING_VAR", "", "default_value")
+	v, err := env.GetValue("NON_EXISTING_VAR", "", "default_value")
 	if err != nil {
-		t.Errorf("Expected no error but got: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if value != "default_value" {
-		t.Errorf("Expected 'default_value', got: %v", value)
-	}
-}
-
-func TestGetValue_ErrorConversion(t *testing.T) {
-	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{
-		"INVALID_VAR": "not_an_int",
-	}
-
-	_, err := env.GetValue("INVALID_VAR", "int", nil)
-	if err == nil {
-		t.Error("Expected an error for invalid conversion but got none")
+	if v != "default_value" {
+		t.Errorf("want default_value, got %v", v)
 	}
 }
 
-func TestSubstituteVariables(t *testing.T) {
+func TestGetValueConversionError(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{
-		"TEST_VAR": "substituted_value",
-	}
+	env.EnvContents = map[interface{}]interface{}{"INVALID_VAR": "not_an_int"}
 
-	result := env.substituteVariables("URL is ${TEST_VAR}/some/path", env.EnvContents)
-	expected := "URL is substituted_value/some/path"
-	if result != expected {
-		t.Errorf("Expected '%s', got: '%s'", expected, result)
+	if _, err := env.GetValue("INVALID_VAR", "int", nil); err == nil {
+		t.Error("expected conversion error, got nil")
 	}
 }
 
-func TestGetBase64EncryptedValue(t *testing.T) {
+// -----------------------------------------------------------------------------
+// Variable substitution
+// -----------------------------------------------------------------------------
+
+func TestSubstitute(t *testing.T) {
 	env := NewEnvParser()
-	encryptedValue := "ENC(YXNkamtuYWtqc2Ric2prYmRma2pzaGRiZg==)"
-	decryptionKey := ""
+	env.EnvContents = map[interface{}]interface{}{"TEST_VAR": "substituted_value"}
 
-	env.EnvContents = map[interface{}]interface{}{
-		"my_encrypted_var": encryptedValue,
+	got := env.substitute("URL is ${TEST_VAR}/some/path")
+	want := "URL is substituted_value/some/path"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
 	}
+}
 
-	decryptedValue, err := env.GetEncryptedValue("my_encrypted_var", "", "expected_value", decryptionKey)
+// -----------------------------------------------------------------------------
+// Encryption helpers
+// -----------------------------------------------------------------------------
+
+func TestBase64EncryptedValue(t *testing.T) {
+	env := NewEnvParser()
+	enc := "ENC(YXNkamtuYWtqc2Ric2prYmRma2pzaGRiZg==)" // base64('asdjknakjsdbsjkbdfkjshdbf')
+
+	env.EnvContents = map[interface{}]interface{}{"my_encrypted_var": enc}
+
+	got, err := env.GetEncryptedValue("my_encrypted_var", "", "expected_value", "")
 	if err != nil {
-		t.Fatalf("Expected no error but got: %v", err)
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "asdjknakjsdbsjkbdfkjshdbf"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Public Conversion helpers
+// -----------------------------------------------------------------------------
+
+func TestConvertInputToType(t *testing.T) {
+	env := NewEnvParser()
+
+	tests := []struct {
+		in   string
+		want interface{}
+	}{
+		{"true", true},
+		{"42", 42},
+		{"3.5", 3.5},
+		{"[a,b]", []interface{}{"a", "b"}},
+		{"{\"a\":1}", map[string]interface{}{"a": float64(1)}},
 	}
 
-	expectedValue := "asdjknakjsdbsjkbdfkjshdbf"
-	if decryptedValue != expectedValue {
-		t.Errorf("Expected '%s', got: '%v'", expectedValue, decryptedValue)
+	for _, tc := range tests {
+		got, err := env.ConvertInputToType(tc.in)
+		if err != nil {
+			t.Errorf("ConvertInputToType(%q) returned error: %v", tc.in, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("ConvertInputToType(%q): want %v (%T), got %v (%T)", tc.in, tc.want, tc.want, got, got)
+		}
+	}
+}
+
+func TestConvertToSpecificType(t *testing.T) {
+	tests := []struct {
+		in   string
+		kind string
+		want interface{}
+	}{
+		{"true", "bool", true},
+		{"42", "int", 42},
+		{"3.14", "float", 3.14},
+		{"[x,y]", "list", []interface{}{"x", "y"}},
+		{"{\"k\":\"v\"}", "json", map[string]interface{}{"k": "v"}},
+	}
+
+	for _, tc := range tests {
+		got, err := ConvertToSpecificType(tc.in, tc.kind)
+		if err != nil {
+			t.Errorf("ConvertToSpecificType(%q,%s) error: %v", tc.in, tc.kind, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("ConvertToSpecificType(%q,%s): want %v (%T), got %v (%T)", tc.in, tc.kind, tc.want, tc.want, got, got)
+		}
 	}
 }
