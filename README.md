@@ -20,7 +20,7 @@
 
 ```bash
 # Go 1.22+
-go get github.com/alexanderthegreat96/envparser
+go get github.com/alexanderthegreat96/envparser/v2
 ```
 
 ---
@@ -32,7 +32,7 @@ package main
 
 import (
     "fmt"
-    "github.com/alexanderthegreat96/envparser"
+    "github.com/alexanderthegreat96/envparser/v2"
 )
 
 func main() {
