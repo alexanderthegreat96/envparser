@@ -1,155 +1,264 @@
 # EnvParser
 
-**EnvParser** is a small, zero‑dependency Go library that loads one or more “dotenv” files, performs \${VAR} substitution, and gives you **strongly‑typed** access to your configuration — even when the values are encrypted.
+## Overview
 
----
+EnvParser is a powerful and flexible Go package designed to streamline the process of loading and managing environment variables from `.env` files in Go applications. Built with simplicity and robustness in mind, it provides advanced features like automatic type conversion, variable substitution, AES-encrypted value handling, and support for multiple configuration files. EnvParser is ideal for developers who need a reliable way to handle environment configurations with diverse data types, making it suitable for both simple and complex applications.
 
-## ✨ What’s new in v2
+## Features
 
-| Quality‑of‑life | Details |
-|-----------------|---------|
-| 🔧 **Functional‑options constructor** | `New()` now accepts options such as `WithFilename`, `WithExtraFiles`, and `WithDebug` — keeping the old `NewEnvParser()` signature for backward compatibility. |
-| 🪄 **Automatic type inference** | Any value read from a file (or returned via `GetVars`) is converted to `bool`, `int`, `float64`, `[]interface{}`, or `map[string]interface{}` whenever possible. |
-| 🔒 **Better encryption support** | Values wrapped in `ENC(...)` can be raw **Base‑64** or **AES‑CFB** (16/24/32‑byte key). Use `GetEncryptedValue` and forget the rest. |
-| 🐞 **Bug fixes & safety** | Correct boolean parsing (no more “`false` → `true`” bug), nil‑safe `GetError`, stricter AES key length checks. |
-| 🧪 **Extended test‑suite** | Public helpers `ConvertInputToType` and `ConvertToSpecificType` are now covered — feel free to use them anywhere in your project. |
-
----
+- **Flexible `.env` File Parsing**: Load environment variables from customizable `.env` files with support for user-defined filenames and paths.
+- **Variable Substitution**: Resolve variables within values using `${VAR}` or `$VAR` syntax, referencing other environment variables.
+- **Automatic Type Conversion**: Convert string values to appropriate Go types, including `string`, `bool`, `int`, `float`, `list`, `tuple`, `dict`, and more.
+- **Encrypted Value Support**: Decrypt AES-encrypted values prefixed with `ENC()` or `enc()` using a provided key.
+- **Multiple File Support**: Parse additional `.env` files alongside the primary file for layered configuration.
+- **Project Root Detection**: Automatically locate the project root using markers like `go.mod`, `.git`, `.project-root`, or `.root`.
+- **Debug Mode**: Enable detailed logging for troubleshooting and parsing insights.
+- **Functional Options**: Configure the parser with options for filename, root path, extra files, and debug mode.
 
 ## Installation
 
+To use EnvParser in your Go project, import it:
+
 ```bash
-# Go 1.22+
-go get github.com/alexanderthegreat96/envparser/v2
+go get github.com/alexanderthegreat96/envparser/v3
 ```
 
----
+## Supported Data Types
 
-## Quick start
+EnvParser supports the following data types for automatic conversion:
+
+- **`str`** or **`string`**: Plain text strings (e.g., `"hello"` → `hello`).
+- **`bool`** or **`boolean`**: Boolean values (`true`, `false`, `1`, `0`, etc.).
+- **`int`** or **`integer`**: Integer numbers (e.g., `"123"` → `123`).
+- **`float`**: Floating-point numbers (e.g., `"3.14"` → `3.14`). Integers in float format (e.g., `"42.0"`) are converted to `int` if they have no decimal part.
+- **`list`** or **`array`**: JSON-style arrays (e.g., `"[1, 2, 3]"` → `[1, 2, 3]`).
+- **`tuple`**: Tuple-like structures parsed as arrays (e.g., `"(1, 2, 3)"` → `[1, 2, 3]`).
+- **`dict`**, **`map`**, or **`json`**: JSON-style objects (e.g., `"{'key': 'value'}"` → `map[string]interface{"key": "value"}`).
+
+## Example `.env` File
+
+Below is an example `.env` file showcasing various data types supported by EnvParser:
+
+```
+# .env
+APP_NAME="Just an app"
+IS_DEV_MODE=true
+REDIS_HOST=hostname
+REDIS_PORT=6379
+REDIS_PASS=my-pass
+REDIS_GLOBAL_CACHE_KEY=ubi-go
+UBISOFT_ACCOUNTS=[{"email": "someone@gmail.com", "password": "this"},{"email": "someone-else", "password": "another-one"}]
+DATABASES=(alex, someone, else, 12)
+DATA={"testing-this": 12, "first-name": "alex"}
+LIST_OF_USERS=["michael", "joe", "stan", 123, true, false]
+```
+
+## Usage Example
+
+The following Go program demonstrates how to initialize EnvParser and extract all variables from the example `.env` file, showcasing the handling of various data types:
 
 ```go
 package main
 
 import (
     "fmt"
-    "github.com/alexanderthegreat96/envparser/v2"
+    "github.com/yourusername/envparser"
 )
 
 func main() {
-    // Modern style — functional options
-    p, err := envparser.New(
-        envparser.WithFilename(".env"),         // default is ".env"
-        envparser.WithExtraFiles([]string{      // optional — load earlier, lower priority
-            ".env.local",
-            ".env.secrets",
-        }),
-        envparser.WithDebug(true),              // noisy logging to stderr
+    // Initialize the parser
+    env, err := envparser.New(
+        envparser.WithFilename(".env"),
+        envparser.WithRootPath(true),
+        envparser.WithDebug(true),
     )
     if err != nil {
-        panic(err)
+        fmt.Println("Error initializing parser:", err)
+        return
     }
 
-    // Strongly‑typed helpers
-    port, _ := p.GetValue("APP_PORT", "int", 8080)
-    debug, _ := p.GetValue("DEBUG", "bool", false)
+    // Check for parsing errors
+    if err := env.GetError(); err != "" {
+        fmt.Println("Parsing error:", err)
+        return
+    }
 
-    // Encrypted value (base64 or AES)
-    secret, _ := p.GetEncryptedValue("JWT_SECRET", "string", nil, os.Getenv("DECRYPT_KEY"))
+    // Extract specific values with type conversion
+    appName, err := env.GetValue("APP_NAME", "string", "DefaultApp")
+    if err != nil {
+        fmt.Println("Error getting APP_NAME:", err)
+        return
+    }
+    fmt.Printf("APP_NAME: %v (%T)\n", appName, appName)
 
-    fmt.Println(port, debug, secret)
+    isDevMode, err := env.GetValue("IS_DEV_MODE", "bool", false)
+    if err != nil {
+        fmt.Println("Error getting IS_DEV_MODE:", err)
+        return
+    }
+    fmt.Printf("IS_DEV_MODE: %v (%T)\n", isDevMode, isDevMode)
+
+    redisHost, err := env.GetValue("REDIS_HOST", "string", "")
+    if err != nil {
+        fmt.Println("Error getting REDIS_HOST:", err)
+        return
+    }
+    fmt.Printf("REDIS_HOST: %v (%T)\n", redisHost, redisHost)
+
+    redisPort, err := env.GetValue("REDIS_PORT", "int", 0)
+    if err != nil {
+        fmt.Println("Error getting REDIS_PORT:", err)
+        return
+    }
+    fmt.Printf("REDIS_PORT: %v (%T)\n", redisPort, redisPort)
+
+    redisPass, err := env.GetValue("REDIS_PASS", "string", "")
+    if err != nil {
+        fmt.Println("Error getting REDIS_PASS:", err)
+        return
+    }
+    fmt.Printf("REDIS_PASS: %v (%T)\n", redisPass, redisPass)
+
+    redisCacheKey, err := env.GetValue("REDIS_GLOBAL_CACHE_KEY", "string", "")
+    if err != nil {
+        fmt.Println("Error getting REDIS_GLOBAL_CACHE_KEY:", err)
+        return
+    }
+    fmt.Printf("REDIS_GLOBAL_CACHE_KEY: %v (%T)\n", redisCacheKey, redisCacheKey)
+
+    ubisoftAccounts, err := env.GetValue("UBISOFT_ACCOUNTS", "list", []interface{}{})
+    if err != nil {
+        fmt.Println("Error getting UBISOFT_ACCOUNTS:", err)
+        return
+    }
+    fmt.Printf("UBISOFT_ACCOUNTS: %v (%T)\n", ubisoftAccounts, ubisoftAccounts)
+
+    databases, err := env.GetValue("DATABASES", "list", []interface{}{})
+    if err != nil {
+        fmt.Println("Error getting DATABASES:", err)
+        return
+    }
+    fmt.Printf("DATABASES: %v (%T)\n", databases, databases)
+
+    data, err := env.GetValue("DATA", "dict", map[string]interface{}{})
+    if err != nil {
+        fmt.Println("Error getting DATA:", err)
+        return
+    }
+    fmt.Printf("DATA: %v (%T)\n", data, data)
+
+    listOfUsers, err := env.GetValue("LIST_OF_USERS", "list", []interface{}{})
+    if err != nil {
+        fmt.Println("Error getting LIST_OF_USERS:", err)
+        return
+    }
+    fmt.Printf("LIST_OF_USERS: %v (%T)\n", listOfUsers, listOfUsers)
+
+    // Get all variables
+    fmt.Println("\nAll Variables:")
+    vars := env.GetVars()
+    for key, value := range vars {
+        fmt.Printf("%s: %v (%T)\n", key, value, value)
+    }
 }
 ```
 
-Prefer the classic style?  It still works:
+### Expected Output
+
+Running the above program with the provided `.env` file will produce output similar to:
+
+```
+APP_NAME: Just an app (string)
+IS_DEV_MODE: true (bool)
+REDIS_HOST: hostname (string)
+REDIS_PORT: 6379 (int)
+REDIS_PASS: my-pass (string)
+REDIS_GLOBAL_CACHE_KEY: ubi-go (string)
+UBISOFT_ACCOUNTS: [map[email:someone@gmail.com password:this] map[email:someone-else password:another-one]] ([]interface {})
+DATABASES: [alex someone else 12] ([]interface {})
+DATA: map[first-name:alex testing-this:12] (map[string]interface {})
+LIST_OF_USERS: [michael joe stan 123 true false] ([]interface {})
+
+All Variables:
+APP_NAME: Just an app (string)
+IS_DEV_MODE: true (bool)
+REDIS_HOST: hostname (string)
+REDIS_PORT: 6379 (int)
+REDIS_PASS: my-pass (string)
+REDIS_GLOBAL_CACHE_KEY: ubi-go (string)
+UBISOFT_ACCOUNTS: [map[email:someone@gmail.com password:this] map[email:someone-else password:another-one]] ([]interface {})
+DATABASES: [alex someone else 12] ([]interface {})
+DATA: map[first-name:alex testing-this:12] (map[string]interface {})
+LIST_OF_USERS: [michael joe stan 123 true false] ([]interface {})
+```
+
+## Configuration Options
+
+EnvParser provides functional options for customization:
+
+- `WithFilename(name string)`: Set a custom filename (e.g., `.env.local`).
+- `WithRootPath(use bool)`: Enable or disable project root detection.
+- `WithExtraFiles(files []string)`: Specify additional `.env` files to parse.
+- `WithDebug(debug bool)`: Enable debug mode for detailed logging.
+
+Example:
 
 ```go
-p := envparser.NewEnvParser(".env.dev", false, nil) // filename, useRootPath, extraFiles
+env, err := envparser.New(
+    envparser.WithFilename(".env.local"),
+    envparser.WithRootPath(false),
+    envparser.WithExtraFiles([]string{".env.defaults", ".env.secrets"}),
+    envparser.WithDebug(true),
+)
 ```
 
----
+## Variable Substitution
 
-## Public API
+EnvParser supports variable substitution in `.env` files. For example:
 
-### Constructors
+```
+# .env
+BASE_URL=http://localhost
+API_URL=${BASE_URL}/api
+```
 
-| Function | Description |
-|----------|-------------|
-| `New(opts ...Option) (*EnvData, error)` | Typed constructor using the options pattern. |
-| `NewEnvParser(params ...interface{}) *EnvData` | Legacy variadic constructor (filename, useRootPath bool, extraFiles []string). |
+`API_URL` will resolve to `http://localhost/api`.
 
-#### Functional Options
+## Encrypted Values
 
-* `WithFilename(name string)` – override main env file (default `.env`).
-* `WithRootPath(use bool)` – enable/disable project‑root discovery.
-* `WithExtraFiles(files []string)` – prepend additional files (first one wins on duplicate keys).
-* `WithDebug(debug bool)` – emit verbose logs.
-
-### Core methods
-
-| Method | Purpose |
-|--------|---------|
-| `GetVars() map[interface{}]interface{}` | Return a **copy** of all variables with auto‑converted types. |
-| `GetValue(key, kind string, def interface{}) (interface{}, error)` | Fetch & convert a single key. `kind` may be `string`, `int`, `float`, `bool`, `list`, `dict`, … |
-| `GetEncryptedValue(key, kind string, def interface{}, decryptKey string) (interface{}, error)` | Like `GetValue` but decrypts `ENC(...)` payloads. Leave `decryptKey` empty for pure Base‑64. |
-| `GetError() string` | Retrieve (and inspect) the last error, if any. |
-
-### Public conversion helpers
-
-Need type‑coercion elsewhere in your code? Use the exported helpers :
+To handle encrypted values (e.g., `ENCRYPTED_SECRET=ENC(base64encodedvalue)`), use:
 
 ```go
-out,  _ := envparser.ConvertInputToType("4.2")        // → float64 4.2
-addr, _ := envparser.ConvertToSpecificType("true", "bool") // → bool true
+secret, err := env.GetEncryptedValue("ENCRYPTED_SECRET", "string", "", "your-16-byte-key")
+if err != nil {
+    fmt.Println("Error:", err)
+    return
+}
+fmt.Printf("Decrypted Secret: %v\n", secret)
 ```
 
-Supported `kind` values: `str`, `string`, `bool`, `boolean`, `float`, `int`, `integer`, `list`, `array`, `tuple`, `dict`, `map`, `json`.
+*Note*: The encryption key must be 16, 24, or 32 bytes for AES encryption.
 
----
+## File Parsing Rules
 
-## Variable substitution
+- Lines starting with `#` are treated as comments and ignored.
+- Empty lines are skipped.
+- Key-value pairs are split on the first `=` character.
+- Values enclosed in quotes are unquoted, and escaped quotes are handled properly.
+- If a key already exists, the first occurrence takes precedence.
+- The parser searches for the project root (if enabled) by looking for markers like `go.mod`, `.git`, `.project-root`, or `.root`.
 
-A value can reference another variable defined in **any** earlier‑loaded file **or** your process environment:
+## Limitations
 
-```dotenv
-API_HOST=localhost
-API_URL=http://${API_HOST}:8080
-```
+- Does not support writing to `.env` files.
+- Encryption requires a valid AES key for non-base64-only encrypted values.
+- JSON parsing assumes valid JSON for `dict` or `list` types; malformed JSON results in errors.
+- File I/O errors (e.g., file not found) are captured in `EnvError`.
 
-`API_URL` resolves to `http://localhost:8080`.
+## Contributing
 
----
-
-## Error handling
-
-Almost every public call returns an `error`. Prefer checking it, but you can also inspect the last one via `parser.GetError()`.
-
----
+Contributions are welcome! Please submit a pull request or open an issue on the GitHub repository.
 
 ## License
 
-MIT © 2025 AlexanderTheGreat96
-
-
-
-## Licence
-MIT License
-
-Copyright (c) [2024] [alexanderthegreat96]
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-1. The above copyright notice and this permission notice shall be included in
-   all copies or substantial portions of the Software.
-
-2. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-   SOFTWARE.
+This project is licensed under the MIT License.

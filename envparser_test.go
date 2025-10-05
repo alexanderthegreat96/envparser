@@ -53,6 +53,9 @@ func TestParseValidFile(t *testing.T) {
 	if got := env.EnvContents["TEST_VAR"]; got != "value" {
 		t.Errorf("TEST_VAR: want value, got %v", got)
 	}
+	if got := env.EnvContents["ANOTHER_VAR"]; got != "another_value" {
+		t.Errorf("ANOTHER_VAR: want another_value, got %v", got)
+	}
 }
 
 func TestNonExistentFile(t *testing.T) {
@@ -68,7 +71,7 @@ func TestNonExistentFile(t *testing.T) {
 
 func TestGetValueExisting(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{"EXISTING_VAR": "some_value"}
+	env.EnvContents = map[string]any{"EXISTING_VAR": "some_value"}
 
 	v, err := env.GetValue("EXISTING_VAR", "", nil)
 	if err != nil {
@@ -81,7 +84,7 @@ func TestGetValueExisting(t *testing.T) {
 
 func TestGetValueDefault(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{}
+	env.EnvContents = map[string]any{}
 
 	v, err := env.GetValue("NON_EXISTING_VAR", "", "default_value")
 	if err != nil {
@@ -94,7 +97,7 @@ func TestGetValueDefault(t *testing.T) {
 
 func TestGetValueConversionError(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{"INVALID_VAR": "not_an_int"}
+	env.EnvContents = map[string]any{"INVALID_VAR": "not_an_int"}
 
 	if _, err := env.GetValue("INVALID_VAR", "int", nil); err == nil {
 		t.Error("expected conversion error, got nil")
@@ -107,7 +110,7 @@ func TestGetValueConversionError(t *testing.T) {
 
 func TestSubstitute(t *testing.T) {
 	env := NewEnvParser()
-	env.EnvContents = map[interface{}]interface{}{"TEST_VAR": "substituted_value"}
+	env.EnvContents = map[string]any{"TEST_VAR": "substituted_value"}
 
 	got := env.substitute("URL is ${TEST_VAR}/some/path")
 	want := "URL is substituted_value/some/path"
@@ -124,7 +127,7 @@ func TestBase64EncryptedValue(t *testing.T) {
 	env := NewEnvParser()
 	enc := "ENC(YXNkamtuYWtqc2Ric2prYmRma2pzaGRiZg==)" // base64('asdjknakjsdbsjkbdfkjshdbf')
 
-	env.EnvContents = map[interface{}]interface{}{"my_encrypted_var": enc}
+	env.EnvContents = map[string]any{"my_encrypted_var": enc}
 
 	got, err := env.GetEncryptedValue("my_encrypted_var", "", "expected_value", "")
 	if err != nil {
@@ -141,21 +144,20 @@ func TestBase64EncryptedValue(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestConvertInputToType(t *testing.T) {
-	env := NewEnvParser()
-
 	tests := []struct {
 		in   string
-		want interface{}
+		want any
 	}{
 		{"true", true},
 		{"42", 42},
 		{"3.5", 3.5},
-		{"[a,b]", []interface{}{"a", "b"}},
-		{"{\"a\":1}", map[string]interface{}{"a": float64(1)}},
+		{"[a,b]", []any{"a", "b"}},
+		{"{\"a\":1}", map[string]any{"a": 1}},
+		{"(1,2,3)", []any{1, 2, 3}}, // tuple auto-converted to list
 	}
 
 	for _, tc := range tests {
-		got, err := env.ConvertInputToType(tc.in)
+		got, err := ConvertInputToType(tc.in)
 		if err != nil {
 			t.Errorf("ConvertInputToType(%q) returned error: %v", tc.in, err)
 			continue
@@ -175,8 +177,9 @@ func TestConvertToSpecificType(t *testing.T) {
 		{"true", "bool", true},
 		{"42", "int", 42},
 		{"3.14", "float", 3.14},
-		{"[x,y]", "list", []interface{}{"x", "y"}},
-		{"{\"k\":\"v\"}", "json", map[string]interface{}{"k": "v"}},
+		{"[x,y]", "list", []any{"x", "y"}},
+		{"{\"k\":\"v\"}", "json", map[string]any{"k": "v"}},
+		{"(1,2)", "tuple", []any{1, 2}}, // tuple converted to list
 	}
 
 	for _, tc := range tests {

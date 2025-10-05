@@ -1,9 +1,5 @@
 package envparser
 
-// This file has been refactored and improved by GPT 3o
-// although some of the original logic is there
-// it was highly improved to achieve better results
-
 import (
 	"bufio"
 	"crypto/aes"
@@ -21,33 +17,16 @@ import (
 	"strings"
 )
 
-// -----------------------------------------------------------------------------
-// Public API types
-// -----------------------------------------------------------------------------
-
 type EnvData struct {
 	FilePath    string
-	EnvContents map[any]any
+	EnvContents map[string]any
 	EnvError    error
 
-	// config the functional‑options path manipulates
 	filename   string
 	useRoot    bool
 	extraFiles []string
 	debug      bool
 }
-
-// -----------------------------------------------------------------------------
-// Functional‑options constructor
-// -----------------------------------------------------------------------------
-
-// Option configures an EnvData instance before it is initialised.
-// Returning an error aborts construction.
-//
-// Example:
-//  p, err := envparser.New(envparser.WithDebug(true), envparser.WithFilename(".env.test"))
-//
-// The legacy constructor (NewEnvParser) continues to work unchanged.
 
 type Option func(*EnvData) error
 
@@ -57,19 +36,16 @@ func New(opts ...Option) (*EnvData, error) {
 		useRoot:  true,
 	}
 
-	// apply options
 	for _, opt := range opts {
 		if err := opt(env); err != nil {
 			return nil, fmt.Errorf("option: %w", err)
 		}
 	}
 
-	// run the same initialisation logic the legacy path uses
 	env.EnvParser(env.filename, env.useRoot, env.extraFiles)
 	return env, env.EnvError
 }
 
-// WithFilename overrides the primary env file (default ".env").
 func WithFilename(name string) Option {
 	return func(e *EnvData) error {
 		if strings.TrimSpace(name) == "" {
@@ -80,7 +56,6 @@ func WithFilename(name string) Option {
 	}
 }
 
-// WithRootPath toggles project‑root resolution (enabled by default).
 func WithRootPath(use bool) Option {
 	return func(e *EnvData) error {
 		e.useRoot = use
@@ -88,7 +63,6 @@ func WithRootPath(use bool) Option {
 	}
 }
 
-// WithExtraFiles appends additional env files that load **before** the main one.
 func WithExtraFiles(files []string) Option {
 	return func(e *EnvData) error {
 		e.extraFiles = append(e.extraFiles, files...)
@@ -96,7 +70,6 @@ func WithExtraFiles(files []string) Option {
 	}
 }
 
-// WithDebug enables noisy logging to stderr.
 func WithDebug(debug bool) Option {
 	return func(e *EnvData) error {
 		e.debug = debug
@@ -104,19 +77,11 @@ func WithDebug(debug bool) Option {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Legacy variadic constructor (unchanged signature)
-// -----------------------------------------------------------------------------
-
 func NewEnvParser(params ...any) *EnvData {
 	env := &EnvData{}
 	env.EnvParser(params...)
 	return env
 }
-
-// -----------------------------------------------------------------------------
-// Original initialiser (slightly adapted to respect debug flag)
-// -----------------------------------------------------------------------------
 
 func (env *EnvData) EnvParser(params ...any) {
 	filename := ".env"
@@ -143,7 +108,6 @@ func (env *EnvData) EnvParser(params ...any) {
 	env.useRoot = useRoot
 	env.extraFiles = extra
 
-	// parse extra files first so that later files win (same as original order)
 	for _, f := range extra {
 		env.parseFile(f, useRoot)
 		if env.EnvError != nil {
@@ -153,10 +117,6 @@ func (env *EnvData) EnvParser(params ...any) {
 	env.parseFile(filename, useRoot)
 }
 
-// -----------------------------------------------------------------------------
-// Public helper methods (identical contracts)
-// -----------------------------------------------------------------------------
-
 func (env *EnvData) GetError() string {
 	if env.EnvError == nil {
 		return ""
@@ -164,17 +124,15 @@ func (env *EnvData) GetError() string {
 	return env.EnvError.Error()
 }
 
-// GetVars still returns a copy with best‑effort automatic typing.
 func (env *EnvData) GetVars() map[any]any {
 	out := make(map[any]any, len(env.EnvContents))
 	for k, v := range env.EnvContents {
-		// Attempt to convert every *string* value; leave others untouched.
 		str, ok := v.(string)
 		if !ok {
 			out[k] = v
 			continue
 		}
-		if converted, err := env.ConvertInputToType(str); err == nil {
+		if converted, err := ConvertInputToType(str); err == nil {
 			out[k] = converted
 		} else {
 			env.EnvError = fmt.Errorf("failed to convert %v: %w", k, err)
@@ -184,7 +142,6 @@ func (env *EnvData) GetVars() map[any]any {
 	return out
 }
 
-// GetEncryptedValue behaves exactly as before but with correct decryption.
 func (env *EnvData) GetEncryptedValue(which, kind string, defaultValue any, key string) (any, error) {
 	if env.EnvError != nil {
 		return nil, env.EnvError
@@ -208,14 +165,12 @@ func (env *EnvData) GetEncryptedValue(which, kind string, defaultValue any, key 
 		return nil, err
 	}
 
-	// explicit type requested?
 	if kind != "" && isAllowedType(kind) {
 		return ConvertToSpecificType(plain, kind)
 	}
-	return env.ConvertInputToType(plain)
+	return ConvertInputToType(plain)
 }
 
-// GetValue is unchanged (bug‑fixed inside helpers).
 func (env *EnvData) GetValue(which, kind string, defaultValue any) (any, error) {
 	if env.EnvError != nil {
 		return nil, env.EnvError
@@ -225,17 +180,11 @@ func (env *EnvData) GetValue(which, kind string, defaultValue any) (any, error) 
 	if !ok {
 		v = defaultValue
 	}
-
-	// requested explicit type?
 	if kind != "" && isAllowedType(kind) {
 		return ConvertToSpecificType(fmt.Sprintf("%v", v), kind)
 	}
-	return env.ConvertInputToType(fmt.Sprintf("%v", v))
+	return ConvertInputToType(fmt.Sprintf("%v", v))
 }
-
-// -----------------------------------------------------------------------------
-// Internal helpers (kept unexported)
-// -----------------------------------------------------------------------------
 
 func (env *EnvData) parseFile(name string, useRoot bool) {
 	var path string
@@ -258,7 +207,7 @@ func (env *EnvData) parseFile(name string, useRoot bool) {
 	defer file.Close()
 
 	if env.EnvContents == nil {
-		env.EnvContents = make(map[any]any)
+		env.EnvContents = make(map[string]any)
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -289,9 +238,8 @@ func splitKV(line string) (key, val string, ok bool) {
 	key = strings.TrimSpace(parts[0])
 	val = strings.TrimSpace(parts[1])
 
-	// handle quoted value
 	if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
-		val = strings.Trim(val, "\"")
+		val = val[1 : len(val)-1]
 		val = strings.ReplaceAll(val, `\"`, `"`)
 	}
 	return key, val, true
@@ -301,57 +249,164 @@ var varRegex = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
 
 func (env *EnvData) substitute(s string) string {
 	return varRegex.ReplaceAllStringFunc(s, func(m string) string {
-		name := strings.Trim(m, "${}")
+		name := strings.TrimSuffix(strings.TrimPrefix(m, "${"), "}")
 		if v, ok := env.EnvContents[name]; ok {
 			return fmt.Sprintf("%v", v)
 		}
 		if v, ok := os.LookupEnv(name); ok {
 			return v
 		}
-		return m // leave untouched
+		return m
 	})
 }
 
-// convertInputToType infers bool/int/float/JSON/list/tuple/dict just like before but with accurate boolean parsing.
-func (env *EnvData) ConvertInputToType(s string) (any, error) {
+func ConvertInputToType(s string) (any, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+
 	if b, err := strconv.ParseBool(s); err == nil {
 		return b, nil
 	}
-
 	if i, err := strconv.Atoi(s); err == nil {
 		return i, nil
 	}
-
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		if float64(int(f)) == f {
+			return int(f), nil
+		}
 		return f, nil
 	}
 
+	if isDict(s) || (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) {
+		js := strings.ReplaceAll(s, "'", "\"")
+
+		var out any
+		err := json.Unmarshal([]byte(js), &out)
+		if err == nil {
+			return autoConvertNested(out), nil
+		}
+		return nil, fmt.Errorf("invalid dict/json (%q): %w", s, err)
+	}
+
 	if isList(s) || isTuple(s) {
-		trimmed := strings.TrimSpace(s[1 : len(s)-1])
-		if trimmed == "" {
-			return []any{}, nil
+		js := s
+		if isTuple(s) {
+			js = "[" + s[1:len(s)-1] + "]"
 		}
-		parts := strings.Split(trimmed, ",")
-		list := make([]any, 0, len(parts))
-		for _, p := range parts {
-			list = append(list, strings.TrimSpace(p))
+		js = strings.ReplaceAll(js, "'", "\"")
+
+		if json.Valid([]byte(js)) {
+			var out any
+			if err := json.Unmarshal([]byte(js), &out); err == nil {
+				return autoConvertNested(out), nil
+			}
 		}
-		return list, nil
+
+		elems := splitTopLevel(js[1 : len(js)-1])
+		arr := make([]any, 0, len(elems))
+		for _, e := range elems {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				continue
+			}
+			v, err := ConvertInputToType(e)
+			if err != nil {
+				arr = append(arr, e)
+			} else {
+				arr = append(arr, v)
+			}
+		}
+		return arr, nil
 	}
 
-	if isDict(s) || json.Valid([]byte(s)) {
-		m, err := convertStringToMap(s)
-		if err != nil {
-			return nil, err
+	if json.Valid([]byte(s)) {
+		var out any
+		if err := json.Unmarshal([]byte(s), &out); err == nil {
+			return autoConvertNested(out), nil
 		}
-		return m, nil
 	}
 
-	return s, nil // plain string
+	return s, nil
+}
+
+func splitTopLevel(s string) []string {
+	var parts []string
+	var buf strings.Builder
+	depth := 0
+	inQuote := false
+	var quoteChar rune
+	escaped := false
+
+	for _, r := range s {
+		if inQuote {
+			buf.WriteRune(r)
+			if escaped {
+				escaped = false
+			} else if r == '\\' {
+				escaped = true
+			} else if r == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+
+		switch r {
+		case '"', '\'':
+			inQuote = true
+			quoteChar = r
+			buf.WriteRune(r)
+		case '{', '[':
+			depth++
+			buf.WriteRune(r)
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+			buf.WriteRune(r)
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(buf.String()))
+				buf.Reset()
+			} else {
+				buf.WriteRune(r)
+			}
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	if buf.Len() > 0 {
+		parts = append(parts, strings.TrimSpace(buf.String()))
+	}
+	return parts
+}
+
+func autoConvertNested(v any) any {
+	switch val := v.(type) {
+	case []any:
+		for i, e := range val {
+			val[i] = autoConvertNested(e)
+		}
+		return val
+	case map[string]any:
+		for k, e := range val {
+			val[k] = autoConvertNested(e)
+		}
+		return val
+	case float64:
+		if float64(int(val)) == val {
+			return int(val)
+		}
+		return val
+	default:
+		return val
+	}
 }
 
 func ConvertToSpecificType(val, kind string) (any, error) {
-	switch strings.ToLower(kind) {
+	kind = strings.ToLower(kind)
+	switch kind {
 	case "str", "string":
 		return val, nil
 	case "bool", "boolean":
@@ -360,30 +415,12 @@ func ConvertToSpecificType(val, kind string) (any, error) {
 		return strconv.Atoi(val)
 	case "float":
 		return strconv.ParseFloat(val, 64)
-	case "list", "array", "tuple":
-		if !isList(val) && !isTuple(val) {
-			return nil, fmt.Errorf("value is not list/tuple syntax")
-		}
-		trimmed := strings.TrimSpace(val[1 : len(val)-1])
-		if trimmed == "" {
-			return []any{}, nil
-		}
-		elems := strings.Split(trimmed, ",")
-		out := make([]any, 0, len(elems))
-		for _, e := range elems {
-			out = append(out, strings.TrimSpace(e))
-		}
-		return out, nil
-	case "dict", "map", "json":
-		return convertStringToMap(val)
+	case "list", "array", "tuple", "dict", "map", "json":
+		return ConvertInputToType(val)
 	default:
 		return nil, fmt.Errorf("unsupported type %s", kind)
 	}
 }
-
-// -----------------------------------------------------------------------------
-// Utility predicates (tweaked where wrong previously)
-// -----------------------------------------------------------------------------
 
 func isList(s string) bool {
 	s = strings.TrimSpace(s)
@@ -418,14 +455,9 @@ func convertStringToMap(s string) (map[string]any, error) {
 	return out, nil
 }
 
-// -----------------------------------------------------------------------------
-// Encryption helpers (bug‑fixed)
-// -----------------------------------------------------------------------------
-
 func decrypt(ciphertext, key string) (string, error) {
 	payload := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(ciphertext, "ENC("), "enc("), ")")
 
-	// base64 only
 	if key == "" {
 		b, err := base64.StdEncoding.DecodeString(payload)
 		if err != nil {
@@ -478,7 +510,6 @@ func findRoot() (string, error) {
 	}
 }
 
-// keeps API list for validation
 func isAllowedType(kind string) bool {
 	allowed := []string{
 		"str", "string", "bool", "boolean", "float",
